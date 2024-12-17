@@ -1,6 +1,5 @@
-
 import time
-import psycopg2
+import pymysql
 import datetime
 from datetime import datetime
 import uuid
@@ -19,12 +18,12 @@ from selenium.common.exceptions import (
 )
 
 # connect aal baase donne
-conn = psycopg2.connect(
-    dbname="sabeel",  # ism l base
-    user="username",  # ism l user 
-    password="password",  # ism l password talqahoum l qol fl west l projet mtaa spring application.yaml
+conn = pymysql.connect(
+    db="soc",  # ism l base
+    user="root",  # ism l user 
+    password="ala123",  # ism l password talqahoum l qol fl west l projet mtaa spring application.yaml
     host="localhost",  # khalaeha localhost 
-    port="5433"  # numro l port ili tekhdem bih
+    port=3306  # numro l port ili tekhdem bih
 )
 cur = conn.cursor()
 
@@ -54,11 +53,17 @@ def scrape_emploi_nat():
     driver.get(start_url_1)
     time.sleep(2)  
 
-    while True:
+    job_count = 0
+    max_jobs = 25
+
+    while job_count < max_jobs:
         print("Scraping job listings from emploi.nat.tn...")
         job_rows = driver.find_elements(By.CSS_SELECTOR, 'tr.emp')
 
         for row in job_rows:
+            if job_count >= max_jobs:
+                break
+
             try:
                 profession = row.find_element(By.CSS_SELECTOR, "td.profession").get_attribute("textContent").strip()
                 posts = row.find_element(By.CSS_SELECTOR, "td.poste:not([style*='display:none'])").get_attribute("textContent").strip()
@@ -74,9 +79,13 @@ def scrape_emploi_nat():
                 if job_data:
                     scraped_data.append(job_data)
                     save_to_database(job_data)
+                    job_count += 1
             except NoSuchElementException:
                 print("Skipping job offer due to missing element in the row.")
                 continue
+
+        if job_count >= max_jobs:
+            break
 
         # Handle pagination - click next page
         try:
@@ -132,82 +141,14 @@ def scrape_job_details(profession, posts, lieu, date, link_element, retries=3):
                 pass
     return None
 
-# Second website - tunisietravail.net
-start_url_2 = "https://www.tunisietravail.net/category/offres-d-emploi-et-recrutement/"
 
-def scrape_tunisietravail():
-    driver.get(start_url_2)
-
-    while True:
-        print("Scraping job listings from tunisietravail.net...")
-
-        try:
-            job_listings = WebDriverWait(driver, 15).until(
-                EC.presence_of_all_elements_located((By.CSS_SELECTOR, 'div.Post'))
-            )
-
-            for job in job_listings:
-                try:
-                    profession = job.find_element(By.CSS_SELECTOR, 'h1 a').text.strip()
-                    post_date = job.find_element(By.CSS_SELECTOR, 'p.PostDateIndex strong.month').text.strip()
-                    job_link = job.find_element(By.CSS_SELECTOR, 'h1 a').get_attribute('href')
-
-                    driver.execute_script("window.open('');")
-                    driver.switch_to.window(driver.window_handles[1])
-                    driver.get(job_link)
-
-                    WebDriverWait(driver, 10).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, 'div.PostContent'))
-                    )
-
-                    try:
-                        details_element = driver.find_element(By.CSS_SELECTOR, 'div.PostContent')
-                        all_details = details_element.text.strip()
-
-                        unwanted_text = "Envoyer votre CV ›› أرسل سيرتك الذاتية ‹‹ Send your resumes ‹‹"
-                        all_details = all_details.replace(unwanted_text, "").strip()
-                    except NoSuchElementException:
-                        all_details = "Not Available"
-
-                    try:
-                        send_resume_link = driver.find_element(By.CSS_SELECTOR, 'a#fill_resume_link').get_attribute('href')
-                    except NoSuchElementException:
-                        send_resume_link = "Not Available"
-
-                    driver.close()
-                    driver.switch_to.window(driver.window_handles[0])
-
-                    job_data = {
-                        'source': 'tunisietravail.net',
-                        'title': profession,
-                        'post_date': post_date, 
-                        'description': all_details,
-                        'send_resume_link': send_resume_link,
-                    }
-
-                    scraped_data.append(job_data)
-                    save_to_database(job_data)
-                    print(f"Scraped Job: {job_data}")
-
-                except NoSuchElementException:
-                    continue
-
-        except TimeoutException:
-            print("Timed out waiting for page to load")
-            break
-
-        # Handle pagination - click next page
-        try:
-            next_button = driver.find_element(By.CSS_SELECTOR, 'a.next.page-numbers')
-            next_button.click()
-            time.sleep(2)
-        except NoSuchElementException:
-            print("No more pages to scrape.")
-            break
 
 def save_to_database(job_data):
     # Generate UUID makench bch yaaml error
-    job_id = str(uuid.uuid4())
+    cur.execute("SELECT MAX(id) FROM job_offer")
+    result = cur.fetchone()
+    max_id = result[0] if result[0] is not None else 0
+    job_id = max_id + 1
 
     
     timestamp = datetime.now()
@@ -219,24 +160,18 @@ def save_to_database(job_data):
 
     # l faza hethi bch tsob beha f west l base ahawka 
     insert_query = """
-    INSERT INTO job_offer_entity (id, created_at, updated_at, title, description, date, place, source, nb_posts, contact, post_date, send_resume_link)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    INSERT INTO job_offer (id, source, title, nb_posts, post_date, contact)
+    VALUES (%s, %s, %s, %s, %s, %s)
     """
     
-    # Extractraction
+    # Extract values
     values = (
-        job_id,  # Insert the generated UUID
-        timestamp,  # created_at timestamp
-        timestamp,  # updated_at timestamp
-        job_data.get('title'),
-        description,  # Truncated description
-        None,  # Assuming 'date' is None since we're using 'post_date' instead
-        job_data.get('place', ''),  # Ensure 'place' is provided
+        job_id,  # Insert the generated job ID
         job_data.get('source'),
+        job_data.get('title'),
         job_data.get('nb_posts'),
-        job_data.get('contact', ''),
         job_data.get('post_date'),  # Use the post_date as a string
-        job_data.get('send_resume_link', '')
+        job_data.get('contact', '')
     )
     
     cur.execute(insert_query, values)
@@ -245,7 +180,7 @@ def save_to_database(job_data):
 # Scrape all pages of both websites
 try:
     scrape_emploi_nat()
-    scrape_tunisietravail()
+    
 finally:
     driver.quit()
     cur.close()
